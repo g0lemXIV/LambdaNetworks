@@ -2,9 +2,10 @@ import tensorflow as tf
 from einops import rearrange
 
 
-class LambdaNetwork2DConv(tf.keras.layers.Layer):
+class LambdaNetwork1DBase(tf.keras.layers.Layer):
     def __init__(
         self,
+        type_: str,
         kernel_out: int,
         key_depth: int,
         intra_depth: int = 1,
@@ -16,7 +17,7 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
         debug_mode=False,
         **kwargs
     ) -> None:
-        super(LambdaNetwork2DConv, self).__init__()
+        super(LambdaNetwork1DBase, self).__init__()
         # check parameters
         self._validate_init_args(
             kernel_out=kernel_out,
@@ -35,16 +36,34 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
         self.kernel_out = kernel_out
         values_depth = kernel_out // heads
 
-        # init convolution layers
-        self.q_layer = tf.keras.layers.Conv2D(
-            key_depth * heads, 1, use_bias=False, **kwargs
-        )
-        self.k_layer = tf.keras.layers.Conv2D(
-            key_depth * intra_depth, 1, use_bias=False, **kwargs
-        )
-        self.v_layer = tf.keras.layers.Conv2D(
-            values_depth * intra_depth, 1, use_bias=False, **kwargs
-        )
+        # init layers
+
+        if type_ == "dense":
+            # init time distributed layers
+            ts = tf.keras.layers.TimeDistributed
+            self.q_layer = ts(
+                tf.keras.layers.Dense(key_depth * heads, use_bias=False, **kwargs)
+            )
+            self.k_layer = ts(
+                tf.keras.layers.Dense(key_depth * intra_depth, use_bias=False, **kwargs)
+            )
+            self.v_layer = ts(
+                tf.keras.layers.Dense(
+                    values_depth * intra_depth, use_bias=False, **kwargs
+                )
+            )
+        elif type_ == "1dconv":
+            # init convolution layers
+            self.q_layer = tf.keras.layers.Conv1D(
+                key_depth * heads, 1, use_bias=False, **kwargs
+            )
+            self.k_layer = tf.keras.layers.Conv1D(
+                key_depth * intra_depth, 1, use_bias=False, **kwargs
+            )
+            self.v_layer = tf.keras.layers.Conv1D(
+                values_depth * intra_depth, 1, use_bias=False, **kwargs
+            )
+
         # init normalization layers
         self.normalization_q = tf.keras.layers.BatchNormalization()
         self.normalization_v = tf.keras.layers.BatchNormalization()
@@ -53,23 +72,17 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
             self.normalization_k = tf.keras.layers.BatchNormalization()
 
         if self.use_context:
-            self.embedding = tf.keras.layers.Conv3D(
-                key_depth,
-                (1, receptive_kernel, receptive_kernel),
-                padding="same",
-                use_bias=False,
+            self.embedding = tf.keras.layers.Conv2D(
+                key_depth, (receptive_kernel, receptive_kernel), padding="same"
             )
         else:
             self.embedding = tf.Variable(
-                initial_value=tf.random.uniform(
-                    shape=[size, size, key_depth, intra_depth]
-                ),
+                initial_value=tf.random.uniform(shape=[size, size, key_depth]),
                 trainable=True,
-                validate_shape=False,
                 name="PositionalEmbedding",
             )
 
-    def call(self, inputs: list):
+    def call(self, inputs):
         self._validate_call_args(inputs=inputs)
 
         # check for different context
@@ -78,11 +91,10 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
 
         # reshape to channels last
         if self.data_format == "channels_first":
-            x = tf.einsum("b c h w -> b h w c", x)
-            c = tf.einsum("b c h w -> b h w c", c)
+            x = tf.einsum("b f t -> b t f", x)
+            c = tf.einsum("b f t -> b t f", c)
 
         # initialization of base parameters
-        _, hh, ww, _ = (*x.shape,)
         q = self.q_layer(x)
         k = self.k_layer(c)
         v = self.v_layer(c)
@@ -93,26 +105,25 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
             k = self.normalization_k(k)
 
         k = tf.keras.activations.softmax(k, axis=-1)
-
-        q = rearrange(q, "b hh ww (h k) -> b h k (hh ww)", h=self.heads)
-        k = rearrange(k, "b hh ww (u k) -> b u k (hh ww)", u=self.intra_depth)
-        v = rearrange(v, "b hh ww (u v) -> b u v (hh ww)", u=self.intra_depth)
-
-        # # calculate context Yc
-        lambda_c = tf.einsum("b m k u, b m v u -> b k v", k, v)
-        Yc = tf.einsum("b h k n, b k v -> b h v n", q, lambda_c)
-        # calculate Positional Yp
+        # rearrange dimensions
+        q = rearrange(q, "b t (h k) -> b h t k", h=self.heads)
+        k = rearrange(k, "b t (u k) -> b u t k", u=self.intra_depth)
+        v = rearrange(v, "b t (u v) -> b u t v", u=self.intra_depth)
+        # create context lambda and output
+        lambda_c = tf.einsum("b u t k, b u t v -> b k v", k, v)
+        Yc = tf.einsum("b h t q, b k v -> b h t v", q, lambda_c)
+        # calculate positional lambda and output
         if self.use_context:
-            v = rearrange(v, "b u v (hh ww) -> b v hh ww u", hh=hh, ww=ww)
+            v = tf.einsum("b u t v -> b v u t", v)
             lambda_p = self.embedding(v)
-            lambda_p = rearrange(lambda_p, "b v h w k -> b k v (h w)")
-            Yp = tf.einsum("b h k n, b k v n -> b h v n", q, lambda_p)
+            lambda_p = rearrange(lambda_p, "b v u t -> b t (v u)")
+            Yp = tf.einsum("b h t q, b k v -> b h t v", q, lambda_p)
         else:
-            lambda_p = tf.einsum("n m k u, b u v m -> b n k v", self.embedding, v)
-            Yp = tf.einsum("b h k n, b n k v -> b h v n", q, lambda_p)
+            lambda_p = tf.einsum("t t k , b u t v -> b k v", self.embedding, v)
+            Yp = tf.einsum("b h t q, b k v -> b h t v", q, lambda_p)
 
         Y = tf.keras.layers.Add()([Yc, Yp])
-        out = rearrange(Y, "b h v (hh ww) -> b hh ww (h v)", hh=hh, ww=ww)
+        out = rearrange(Y, "b h t c -> b t (h c)")
 
         if self.debug_mode:
             debug_dict = dict()
@@ -128,7 +139,7 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
         return out
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], self.kernel_out)
+        return (input_shape[0], input_shape[1], self.kernel_out)
 
     def _validate_call_args(self, inputs):
         """Validates arguments of the call method."""
@@ -179,3 +190,61 @@ class LambdaNetwork2DConv(tf.keras.layers.Layer):
                 "{} layer should have channels_first, channels_last format."
                 "It is {}".format(class_name, channel)
             )
+
+
+class LambdaNetwork1DConv(LambdaNetwork1DBase):
+    def __init__(
+        self,
+        kernel_out,
+        key_depth,
+        intra_depth=1,
+        heads=4,
+        size=None,
+        receptive_kernel=None,
+        data_format="channels_last",
+        norm_keys=False,
+        debug_mode=False,
+        **kwargs
+    ):
+        super(LambdaNetwork1DConv, self).__init__(
+            type_="1dconv",
+            kernel_out=kernel_out,
+            key_depth=key_depth,
+            intra_depth=intra_depth,
+            heads=heads,
+            size=size,
+            receptive_kernel=receptive_kernel,
+            data_format=data_format,
+            norm_keys=norm_keys,
+            debug_mode=debug_mode,
+            **kwargs
+        )
+
+
+class LambdaNetwork1Dense(LambdaNetwork1DBase):
+    def __init__(
+        self,
+        kernel_out,
+        key_depth,
+        intra_depth=1,
+        heads=4,
+        size=None,
+        receptive_kernel=None,
+        data_format="channels_last",
+        norm_keys=False,
+        debug_mode=False,
+        **kwargs
+    ):
+        super(LambdaNetwork1Dense, self).__init__(
+            type_="dense",
+            kernel_out=kernel_out,
+            key_depth=key_depth,
+            intra_depth=intra_depth,
+            heads=heads,
+            size=size,
+            receptive_kernel=receptive_kernel,
+            data_format=data_format,
+            norm_keys=norm_keys,
+            debug_mode=debug_mode,
+            **kwargs
+        )
