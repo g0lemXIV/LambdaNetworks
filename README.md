@@ -17,7 +17,47 @@ pip install .
 
 ## Examples of usage
 
-soon...
+**Using Lambda 2D**
+```python
+from lambda_layers import LambdaNetwork2DConv
+
+layer = LambdaNetwork2DConv(kernel_out = 32,  # output of the layer
+                            key_depth = 16, # depth of keys
+                            intra_depth = 1, depth of 
+                            heads = 4, # number of heads
+                            size = 28 * 28, # total size of the input image (use for global embedding)
+                            receptive_kernel = 7, # dimension of kernel if local embedding is using
+                            data_format = "channels_last", # data format
+                            norm_keys = False, # normalization of the key before activation function
+                            **kwargs # additional args which can use in queries, keys, and values
+                            )
+```
+**Using Lambda 1D/Dense**
+```python
+from lambda_layers import LambdaNetwork1DConv, LambdaNetwork1Dense
+
+layer = LambdaNetwork1DConv(kernel_out = 32,  # output of the layer
+                            key_depth = 16, # depth of keys
+                            intra_depth = 1, # infra-depth of the layer
+                            heads = 4, # number of heads
+                            size = 28, # total number of timesteps
+                            receptive_kernel = 7, # dimension of kernel if local embedding is using
+                            data_format = "channels_last", # data format
+                            norm_keys = False, # normalization of the key before activation function
+                            **kwargs # additional args which can use in queries, keys, and values
+                            )
+                            
+layer = LambdaNetwork1Dense(kernel_out = 32,  # output of the layer
+                            key_depth = 16, # depth of keys
+                            intra_depth = 1, # infra-depth of the layer
+                            heads = 4, # number of heads
+                            size = 28, # total number of timesteps
+                            receptive_kernel = 7, # dimension of kernel if local embedding is using
+                            data_format = "channels_last", # data format
+                            norm_keys = False, # normalization of the key before activation function
+                            **kwargs # additional args which can use in queries, keys, and values
+                            )
+```
 
 ## Citations
 
@@ -32,5 +72,3 @@ soon...
     note={under review}
 }
 ```
-
-
