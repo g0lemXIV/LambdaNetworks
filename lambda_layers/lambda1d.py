@@ -156,7 +156,7 @@ class LambdaNetwork1DBase(tf.keras.layers.Layer):
                 "Given length: {}".format(class_name, len(inputs))
             )
         if len(inputs) > 1:
-            if inputs[0].shape != inputs[1].shape:
+            if inputs[0].shape[1:] != inputs[1].shape[1:]:
                 raise ValueError(
                     "{} layer should have same last dimension of inputs "
                     "and context tensor."
