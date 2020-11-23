@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name='lambdanet-tf',
   packages=find_packages(),
-  version='0.1',
+  version='0.2',
   license='MIT',
   description='Lambda Networks - Tensorflow +2.0',
   url='https://github.com/g0lemXIV/LambdaNetworks',
